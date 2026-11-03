@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" width="900" height="560" font-family="Helvetica, Arial, sans-serif" font-size="14">
+  <rect width="900" height="560" fill="#ffffff"/>
+
+  <!-- Garden -->
+  <rect x="20" y="20" width="860" height="380" rx="14" fill="#eef7e8" stroke="#9cc58a" stroke-width="2"/>
+  <text x="36" y="46" font-size="16" font-weight="bold" fill="#3c6e2f">Garden</text>
+
+  <!-- House -->
+  <rect x="370" y="20" width="160" height="70" fill="#e6e1d8" stroke="#8a8170" stroke-width="2"/>
+  <text x="450" y="60" text-anchor="middle" fill="#5b5446">House</text>
+
+  <!-- Zone 1 loop -->
+  <path d="M 430 300 L 430 340 L 60 340 L 60 120 L 330 120 L 330 300 Z" fill="#d9ecff" fill-opacity="0.55" stroke="#1f6fd1" stroke-width="3"/>
+  <text x="195" y="230" text-anchor="middle" font-size="22" font-weight="bold" fill="#1f6fd1">ZONE 1</text>
+  <text x="195" y="254" text-anchor="middle" fill="#1f6fd1">relay ON (NO contact)</text>
+
+  <!-- Zone 2 loop -->
+  <path d="M 470 300 L 470 340 L 840 340 L 840 120 L 570 120 L 570 300 Z" fill="#ffe6cc" fill-opacity="0.55" stroke="#d1701f" stroke-width="3"/>
+  <text x="705" y="230" text-anchor="middle" font-size="22" font-weight="bold" fill="#d1701f">ZONE 2</text>
+  <text x="705" y="254" text-anchor="middle" fill="#d1701f">relay OFF (NC contact, default)</text>
+
+  <!-- Feed wires from loops to relay -->
+  <line x1="330" y1="300" x2="430" y2="300" stroke="#1f6fd1" stroke-width="3"/>
+  <line x1="570" y1="300" x2="470" y2="300" stroke="#d1701f" stroke-width="3"/>
+
+  <!-- Relay box -->
+  <rect x="395" y="180" width="110" height="95" rx="8" fill="#ffffff" stroke="#444" stroke-width="2"/>
+  <text x="450" y="200" text-anchor="middle" font-weight="bold">Mower Zone</text>
+  <text x="450" y="217" text-anchor="middle" font-size="12">ESP-01 + relay</text>
+  <text x="450" y="232" text-anchor="middle" font-size="12">+ BME280</text>
+  <text x="412" y="266" font-size="12" fill="#1f6fd1">NO</text>
+  <text x="442" y="266" font-size="12">COM</text>
+  <text x="478" y="266" font-size="12" fill="#d1701f">NC</text>
+  <line x1="420" y1="275" x2="430" y2="300" stroke="#1f6fd1" stroke-width="3"/>
+  <line x1="485" y1="275" x2="470" y2="300" stroke="#d1701f" stroke-width="3"/>
+
+  <!-- Dock -->
+  <rect x="405" y="350" width="90" height="38" rx="6" fill="#555" />
+  <text x="450" y="374" text-anchor="middle" fill="#fff" font-weight="bold">Dock</text>
+  <line x1="450" y1="350" x2="450" y2="275" stroke="#444" stroke-width="3" stroke-dasharray="6 4"/>
+  <text x="458" y="330" font-size="12" fill="#444">wire out</text>
+
+  <!-- Mower -->
+  <circle cx="110" cy="295" r="16" fill="#2f7d32"/>
+  <text x="110" y="300" text-anchor="middle" fill="#fff" font-size="11" font-weight="bold">M</text>
+  <text x="132" y="291" font-size="12" fill="#2f7d32">PAMR 500 A1</text>
+  <text x="132" y="306" font-size="12" fill="#2f7d32">+ ESP8266 (Robot_mower)</text>
+
+  <!-- Legend / logic -->
+  <text x="36" y="430" font-size="16" font-weight="bold">How it works</text>
+  <text x="36" y="456">1. Mower setup: 1 zone, schedule 00:00 - 23:59 every day, stop on rain + resume. The mower always "wants" to mow.</text>
+  <text x="36" y="478">2. ESP in the mower fakes rain on the rain sensor wire: Mow OFF = rain (stay docked), Mow ON = dry (go mow).</text>
+  <text x="36" y="500">3. Before a start, HA sets "Mower zone" (select): Zone 1 = relay ON, Zone 2 = relay OFF. The dock signal goes to that loop.</text>
+  <text x="36" y="522">4. HA decides when (Mow switch + Mowing time) and where (Mower zone). Timekeeping runs on the mower ESP itself.</text>
+  <text x="36" y="544" fill="#777" font-size="12">Sketch only, not to scale. Change zone only while the mower is docked.</text>
+</svg>

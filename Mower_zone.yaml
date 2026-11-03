@@ -1,0 +1,81 @@
+# Board: Generic ESP8266 Board (Generic)
+# Definition: definitions/boards/generic-esp8266/manifest.yaml
+
+esphome:
+  name: mower-zone
+  friendly_name: Mower Zone
+
+esp8266:
+  board: esp01_1m
+
+logger:
+  baud_rate: 0  # frees GPIO3 (RX) for I2C SCL
+
+api:
+  encryption:
+    key: !secret mower_zone_api_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: Mower Zone Fallback Hotspot
+    password: "xyz"
+
+captive_portal:
+
+# GY-BME/PM280 soldered to ESP-01 header: SDA=GPIO2, SCL=GPIO3 (RX), 3V3, GND.
+# GPIO2 boot strap stays high via the board's 10k pull-ups.
+i2c:
+  sda: GPIO2
+  scl: GPIO3
+  scan: true
+
+sensor:
+  # If the log reports a wrong chip ID (0x58), the board is a BMP280:
+  # switch to platform: bmp280_i2c and drop the humidity block.
+  - platform: bme280_i2c
+    address: 0x76  # 0x77 if SDO is tied to 3V3
+    update_interval: 60s
+    temperature:
+      name: "Mower zone temperature"
+    humidity:
+      name: "Mower zone humidity"
+    pressure:
+      name: "Mower zone pressure"
+
+  # ESP-01 relay module v1 (relay on GPIO0) - dumb executor, HA decides
+# Zone 1 = NO (relay ON), Zone 2 = NC (relay OFF, default)
+
+
+switch:
+  - platform: gpio
+    id: zone_relay
+    pin:
+      number: GPIO0
+      inverted: true          # flip to false if zones come out reversed
+    restore_mode: ALWAYS_OFF  # boot / power loss -> Zone 2
+    internal: true
+
+select:
+  - platform: template
+    name: "Mower zone"
+    id: zone_select
+    icon: mdi:map-marker-path
+    options:
+      - "Zone 1"
+      - "Zone 2"
+    initial_option: "Zone 2"   # matches relay ALWAYS_OFF at boot
+    optimistic: true
+    set_action:
+      - if:
+          condition:
+            lambda: 'return x == "Zone 1";'
+          then:
+            - switch.turn_on: zone_relay
+          else:
+            - switch.turn_off: zone_relay
+

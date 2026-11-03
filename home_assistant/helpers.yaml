@@ -1,0 +1,43 @@
+# Home Assistant helpers used by the mower automations.
+# In my HA these were created in the UI (Settings > Devices & services > Helpers).
+# The YAML below is the equivalent configuration.yaml form.
+
+# Countdown shown on the dashboard while mowing.
+# Started/cancelled by "Mower - start/cancel countdown" automations.
+timer:
+  mower_mowing_countdown:
+    name: mower_mowing_countdown
+    icon: mdi:timer
+    restore: false
+
+# Last check-in of the mower: 'charger | status | <voltage>V | YYYY-MM-DD HH:MM:SS UTC'.
+# Written by the "Mower - last check" automation. The mower is offline most of the
+# time (WiFi off while docked), so this keeps the last known values.
+input_text:
+  mower_last_check:
+    name: Mower last check
+    icon: mdi:robot-mower
+    min: 0
+    max: 100
+
+# One readable state for the dashboard:
+#   Working | Sleeping - charging OK | Idle - charging OK | Not charging | Warning | Issue
+# Warning = no check-in for > 2 h, Issue = no check-in for > 10 h.
+template:
+  - sensor:
+      - name: Mower state
+        state: >-
+          {% set st = states('sensor.mower_parkside_pamr_500_a1_status') %}
+          {% set online = st not in ['unavailable', 'unknown'] %}
+          {% set last = (states('input_text.mower_last_check') ~ ' |  |  | ').split(' | ') %}
+          {% set ts = as_timestamp(last[3] | replace(' UTC', '+00:00'), now().timestamp()) %}
+          {% set off_min = (now().timestamp() - ts) / 60 %}
+          {% set healthy = last[0] == 'on' and last[1] | lower == 'standby' and (last[2] | replace('V', '') | float(0)) >= 18.25 %}
+          {% set night = now().hour >= 21 or now().hour < 7 %}
+          {% if online and (is_state('switch.mower_parkside_pamr_500_a1_mow', 'on') or is_state('binary_sensor.mower_parkside_pamr_500_a1_moving', 'on') or st in ['Mowing', 'Returning', 'Preparing']) %}Working
+          {% elif not online and off_min > 600 %}Issue
+          {% elif not online and off_min > 120 %}Warning
+          {% elif not healthy %}Not charging
+          {% elif night %}Sleeping - charging OK
+          {% else %}Idle - charging OK
+          {% endif %}

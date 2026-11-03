@@ -1,0 +1,78 @@
+# Home Assistant automations for the Parkside PAMR 500 A1 mower.
+# Exported from HA (Settings > Automations) on 2026-11-03.
+# Paste into automations.yaml, or import each one via the automation editor (Edit in YAML).
+
+- id: '1789028442104'
+  alias: Mower - simple logic
+  description: ''
+  triggers:
+  - at: '16:11:00'
+    trigger: time
+    enabled: false
+  - at: '11:11:00'
+    trigger: time
+  - at: '15:11:00'
+    trigger: time
+  conditions:
+  - condition: time
+    weekday:
+    - mon
+    - wed
+    - fri
+    enabled: true
+  actions:
+  - action: number.set_value
+    metadata: {}
+    target:
+      entity_id: number.mower_parkside_pamr_500_a1_mowing_time
+    data: {}
+  - action: switch.turn_on
+    metadata: {}
+    target:
+      entity_id: switch.mower_parkside_pamr_500_a1_mow
+    data: {}
+  mode: single
+- id: '1786608202961'
+  alias: Mower - start countdown on Mow ON
+  triggers:
+  - trigger: state
+    entity_id: switch.mower_parkside_pamr_500_a1_mow
+    to: 'on'
+  actions:
+  - target:
+      entity_id: timer.mower_mowing_countdown
+    action: timer.start
+    data:
+      duration: '{{ (states(''number.mower_parkside_pamr_500_a1_mowing_time'') | int) * 60 }}'
+  mode: single
+- id: '1786608216706'
+  alias: Mower - cancel countdown on Mow OFF
+  triggers:
+  - trigger: state
+    entity_id: switch.mower_parkside_pamr_500_a1_mow
+    to: 'off'
+  actions:
+  - target:
+      entity_id: timer.mower_mowing_countdown
+    action: timer.cancel
+  mode: single
+- id: '1793226628441'
+  alias: Mower - last check
+  description: Stores the mower's last check-in in input_text.mower_last_check as 'charger | status | <voltage>V | YYYY-MM-DD HH:MM:SS UTC' (timestamp also stamped when it goes offline). Read by sensor.mower_state.
+  triggers:
+  - trigger: state
+    entity_id:
+    - sensor.mower_parkside_pamr_500_a1_status
+    - sensor.mower_parkside_pamr_500_a1_battery_voltage
+    - binary_sensor.mower_parkside_pamr_500_a1_charger
+  conditions:
+  - condition: template
+    value_template: '{{ trigger.to_state.state not in [''unavailable'', ''unknown''] or trigger.from_state.state not in [''unavailable'', ''unknown''] }}'
+  actions:
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.mower_last_check
+    data:
+      value: '{% set old = (states(''input_text.mower_last_check'') ~ '' |  |  | '').split('' | '') %}{% set s = states(''sensor.mower_parkside_pamr_500_a1_status'') %}{% set s = s | lower if s not in [''unavailable'', ''unknown''] else old[1] %}{% set v = states(''sensor.mower_parkside_pamr_500_a1_battery_voltage'') %}{% set v = ((v | float) | round(2) ~ ''V'') if v not in [''unavailable'', ''unknown''] else old[2] %}{% set c = states(''binary_sensor.mower_parkside_pamr_500_a1_charger'') %}{% set c = c if c not in [''unavailable'', ''unknown''] else old[0] %}{{ c }} | {{ s }} | {{ v }} | {{ utcnow().strftime(''%Y-%m-%d %H:%M:%S'') }} UTC'
+  mode: queued
+  max: 20

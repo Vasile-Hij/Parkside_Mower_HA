@@ -1,0 +1,592 @@
+# Board: WEMOS D1 MINI (ESP8266) - config targets esp8266/d1_mini
+
+esphome:
+  name: mower-parkside-pamr-500-a1
+  name_add_mac_suffix: false
+  friendly_name: mower parkside pamr 500 a1
+  project:
+    name: ha.mower-parkside-pamr-500-a1
+    version: "1.4.0"
+
+esp8266:
+  board: d1_mini
+
+logger:
+
+api:
+  reboot_timeout: 0s # required: wifi is switched off at night
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_pass
+  reboot_timeout: 0s # required: wifi is switched off at night
+  ap:
+    ssid: "Lawn Mower Fallback Hotspot"
+    password: "xyz"
+
+captive_portal:
+
+#### End of ESPHome boilerplate ####
+
+substitutions:
+  max_mowing_time: "800"
+  moving_threshold: "0.2"
+  stand_still_delay: "4000"
+  moving_delay: "2000"
+  acc_update_interval: "100"
+  vibration_update_interval: "2000"
+  battery_update_interval: "1000"
+  battery_voltage_gain: "24.3"
+  battery_voltage_offset: "0.0"
+  battery_filter_weight: "0.9"
+  charging_threshold: "20.5"
+  not_charging_threshold: "18.5"
+  charging_slope_threshold: "0.01"
+  charging_delay: "4000"
+  tick_interval: "100"
+
+  # Night quiet mode (wifi off while docked + charging + no fault)
+  night_start_hour: "21"
+  night_end_hour: "7"
+  checkin_minutes: "3"               # wifi on for the first N minutes of every check-in period
+  checkin_period_minutes: "60"       # check-in every N minutes, day and night (divisor of 60)
+  theft_arm_day: "true"              # also arm theft detection during the day when docked
+  ha_start_entity: "input_boolean.mower_start_pending" # HA queues a start here, delivered at next check-in
+
+  # Theft detection (armed at night while docked)
+  theft_vibration_threshold: "1.5"   # m/s² RSS of MAD, ~7x normal moving threshold
+  theft_tilt_threshold: "2.0"        # m/s² change of gravity vector vs docked baseline (~12 deg)
+
+  # Fault recheck: standing still, not flagged charging, voltage holding -> it is charging
+  fault_recheck_delay: "300000"      # ms the voltage must hold
+  fault_recheck_min_voltage: "19.5"  # V, below this never assume charging
+  idle_drop_tolerance: "0.05"        # V allowed drop during recheck window
+
+  # Charger lost while docked (charging flagged, voltage falls from its peak)
+  charger_lost_drop: "0.3"           # V
+
+  # Battery protection (5S Li-ion: 21.0V = 100%, ~18.25V = 20%)
+  low_battery_voltage: "18.25"       # ~20%: send home, block mowing
+  low_battery_resume_voltage: "20.0" # mowing allowed again above this
+  critical_battery_voltage: "17.0"   # ~5%: ESP enters permanent deep sleep
+  low_battery_delay: "30000"         # ms below threshold before acting
+
+globals:
+  - id: ticks
+    type: uint32_t
+    initial_value: "0"
+  - id: battery_iir
+    type: float
+    initial_value: "0.0"
+  - id: quiet_mode
+    type: bool
+    initial_value: "false"
+  - id: theft_armed
+    type: bool
+    initial_value: "false"
+
+i2c:
+  scl: GPIO5
+  sda: GPIO4
+  scan: true
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+deep_sleep:
+  id: deep_sleep_1 # no run_duration -> only entered on critical battery, wake = reset/power cycle
+
+text_sensor:
+  - platform: template
+    id: status
+    name: status
+    update_interval: ${tick_interval}ms
+    lambda: !lambda |-
+      static std::string last = "";
+      int statusNum = (id(mow)->state?1:0) | (id(moving)->state?2:0) | (id(charging)->state?4:0);
+      std::string value = "Unknown";
+      switch(statusNum)
+      {
+        case 4: value = "Standby"; break;
+        case 5: value = "Preparing"; break;
+        case 3:
+        case 7: value = "Mowing"; break;
+        case 2:
+        case 6: value = "Returning"; break;
+        case 0:
+        case 1: value = "Fault"; break;
+      }
+      if( !id(charging)->has_state() || !id(moving)->has_state() )
+      {
+        value = "Unknown";
+      }
+      id(ticks)++;
+      if(value == last)
+      {
+        return {};
+      }
+      last = value;
+      return value;
+
+sensor:
+  - platform: mpu6050
+    id: accelerometer
+    address: 0x68
+    accel_x:
+      id: accel_x
+    accel_y:
+      id: accel_y
+    accel_z:
+      id: accel_z
+    update_interval: never
+
+  - platform: template
+    disabled_by_default: True
+    icon: "mdi:vibrate"
+    name: "Vibration"
+    id: acc_vibration
+    unit_of_measurement: "m/s²"
+    accuracy_decimals: 3
+    update_interval: ${acc_update_interval}ms
+    lambda: !lambda |-
+      static constexpr size_t numSamples = $vibration_update_interval / $tick_interval;
+      static constexpr float movingThreshold = $moving_threshold;
+      static float samplesX[numSamples];
+      static float samplesY[numSamples];
+      static float samplesZ[numSamples];
+      static int sample = 0;
+
+      auto mad = [](float (&samples)[numSamples])
+      {
+        float avg = 0;
+        for(auto s : samples) avg += s;
+        avg = avg / numSamples;
+        float m = 0;
+        for(auto s : samples) m += fabs(s - avg);
+        return m / numSamples;
+      };
+
+      auto update_moving = [](float vibration)
+      {
+        static uint32_t delayCount = 0;
+        bool currentState = id(moving)->state;
+        bool newState = ( vibration >= movingThreshold );
+        if(newState == currentState && id(moving)->has_state())
+        {
+          delayCount = 0;
+        }
+        else if( newState && (delayCount >= $moving_delay/$vibration_update_interval) )
+        {
+          delayCount = 0;
+          id(moving).publish_state(true);
+        }
+        else if( !newState && (delayCount >= $stand_still_delay/$vibration_update_interval) )
+        {
+          delayCount = 0;
+          id(moving).publish_state(false);
+        }
+        else
+        {
+          delayCount++;
+        }
+      };
+
+      auto& acc = id(accelerometer);
+      if(!acc) return NAN;
+      acc->update();
+      samplesX[sample] = id(accel_x).state;
+      samplesY[sample] = id(accel_y).state;
+      samplesZ[sample] = id(accel_z).state;
+      sample++;
+      if(sample >= numSamples)
+      {
+        sample = 0;
+        float madX = mad(samplesX);
+        float madY = mad(samplesY);
+        float madZ = mad(samplesZ);
+        float rss = sqrtf(madX*madX + madY*madY + madZ*madZ);
+
+        // Theft detection: big shake or orientation change while armed
+        static float baseX = 0, baseY = 0, baseZ = 0;
+        static bool baseValid = false;
+        float avgX = 0, avgY = 0, avgZ = 0;
+        for(size_t i = 0; i < numSamples; i++)
+        {
+          avgX += samplesX[i];
+          avgY += samplesY[i];
+          avgZ += samplesZ[i];
+        }
+        avgX /= numSamples;
+        avgY /= numSamples;
+        avgZ /= numSamples;
+
+        if(!id(theft_armed))
+        {
+          baseValid = false;
+        }
+        else if(!baseValid)
+        {
+          baseX = avgX; baseY = avgY; baseZ = avgZ;
+          baseValid = true;
+        }
+        else
+        {
+          float dx = avgX - baseX, dy = avgY - baseY, dz = avgZ - baseZ;
+          float tilt = sqrtf(dx*dx + dy*dy + dz*dz);
+          if(!id(theft_alarm)->state && (rss >= $theft_vibration_threshold || tilt >= $theft_tilt_threshold))
+          {
+            id(theft_alarm)->publish_state(true);
+            wifi::global_wifi_component->enable();
+          }
+          else if(rss < movingThreshold)
+          {
+            // slow drift compensation while still
+            baseX = 0.95f*baseX + 0.05f*avgX;
+            baseY = 0.95f*baseY + 0.05f*avgY;
+            baseZ = 0.95f*baseZ + 0.05f*avgZ;
+          }
+        }
+
+        update_moving(rss);
+        return rss;
+      }
+      return {};
+
+  # Raw ADC: internal, not sent to HA every second anymore
+  - platform: adc
+    pin: GPIO17
+    id: battery_voltage
+    internal: True
+    filters:
+      - multiply: $battery_voltage_gain
+      - offset: $battery_voltage_offset
+    update_interval: ${battery_update_interval}ms
+    force_update: True
+    on_value:
+      lambda: !lambda |-
+          static constexpr int chargingDelay = $charging_delay / $battery_update_interval;
+          static constexpr int notChargingDelay = $charging_delay / $battery_update_interval;
+          static constexpr int faultRecheckCount = $fault_recheck_delay / $battery_update_interval;
+          static constexpr int lowBatteryCount = $low_battery_delay / $battery_update_interval;
+
+          static int chargingCount = 0;
+          static int notChargingCount = 0;
+          static int idleCount = 0;
+          static int lowCount = 0;
+          static int criticalCount = 0;
+          static float idleRef = 0;
+          static float chargeRef = 0;
+          static bool init = false;
+
+          float voltage = id(battery_voltage)->state;
+          if(!init)
+          {
+            id(battery_iir) = voltage;
+            init = true;
+          }
+          float prevIir = id(battery_iir);
+          id(battery_iir) = $battery_filter_weight * prevIir + (1.0 - $battery_filter_weight) * voltage;
+          float iir = id(battery_iir);
+          float slope = iir - prevIir;
+          bool is_moving = id(moving)->state;
+          bool is_charging = id(charging)->state;
+
+          // Original detection
+          if(voltage > $charging_threshold)
+          {
+            chargingCount++;
+            notChargingCount = 0;
+          }
+          else if(slope >= $charging_slope_threshold)
+          {
+            chargingCount++;
+            notChargingCount = 0;
+          }
+          else
+          {
+            chargingCount = 0;
+            if(voltage < $not_charging_threshold)
+            {
+              notChargingCount++;
+            }
+            else
+            {
+              notChargingCount = 0;
+            }
+          }
+          bool chargingDetected = (chargingCount >= chargingDelay);
+          bool notChargingDetected = (notChargingCount >= notChargingDelay);
+
+          // Fault recheck: docked charger floating the battery gives no slope and may sit under 20.5V
+          if(!is_moving && !is_charging && iir >= $fault_recheck_min_voltage)
+          {
+            if(idleCount == 0)
+            {
+              idleRef = iir;
+            }
+            idleCount++;
+            if(iir < idleRef - $idle_drop_tolerance)
+            {
+              idleCount = 0;
+            }
+            else if(idleCount >= faultRecheckCount)
+            {
+              chargingDetected = true;
+              idleCount = 0;
+            }
+          }
+          else
+          {
+            idleCount = 0;
+          }
+
+          // Charger lost while docked: voltage falls from its peak
+          if(is_charging && !is_moving)
+          {
+            if(iir > chargeRef)
+            {
+              chargeRef = iir;
+            }
+            if(iir < chargeRef - $charger_lost_drop)
+            {
+              notChargingDetected = true;
+              chargingDetected = false;
+            }
+          }
+          else
+          {
+            chargeRef = iir;
+          }
+
+          if(is_moving)
+          {
+            chargingCount = 0;
+            id(charging)->publish_state(false);
+          }
+          else if(chargingDetected)
+          {
+            id(charging)->publish_state(true);
+          }
+          else if(notChargingDetected)
+          {
+            id(charging)->publish_state(false);
+          }
+
+          // Low battery (~20%): send home, block mowing
+          if(!id(charging)->state && iir < $low_battery_voltage)
+          {
+            lowCount++;
+          }
+          else
+          {
+            lowCount = 0;
+          }
+          if(lowCount >= lowBatteryCount && !id(low_battery)->state)
+          {
+            id(low_battery)->publish_state(true);
+            if(id(mow)->state)
+            {
+              id(mow)->turn_off();
+            }
+          }
+          else if(id(low_battery)->state && iir >= $low_battery_resume_voltage)
+          {
+            id(low_battery)->publish_state(false);
+          }
+
+          // Critical (~5%) while standing still: stop the ESP draining the pack
+          if(!id(charging)->state && !is_moving && iir < $critical_battery_voltage)
+          {
+            criticalCount++;
+          }
+          else
+          {
+            criticalCount = 0;
+          }
+          if(criticalCount >= lowBatteryCount)
+          {
+            id(deep_sleep_1)->begin_sleep(true);
+          }
+
+  - platform: template
+    name: "Battery voltage"
+    id: battery_voltage_filtered
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 2
+    update_interval: 30s
+    lambda: 'return id(battery_iir);'
+
+  - platform: template
+    name: "Battery"
+    id: battery_percent
+    unit_of_measurement: "%"
+    device_class: battery
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: !lambda |-
+      // 5S Li-ion resting curve
+      static const float v[] = {16.5, 17.5, 18.25, 18.75, 19.25, 20.0, 21.0};
+      static const float p[] = {0,    10,   20,    40,    60,    80,   100};
+      float x = id(battery_iir);
+      if(x <= v[0]) return 0.0f;
+      if(x >= v[6]) return 100.0f;
+      for(int i = 1; i < 7; i++)
+      {
+        if(x <= v[i])
+        {
+          return p[i-1] + (x - v[i-1]) * (p[i] - p[i-1]) / (v[i] - v[i-1]);
+        }
+      }
+      return 100.0f;
+
+binary_sensor:
+  - platform: gpio
+    name: "Mower_on"
+    disabled_by_default: True
+    pin:
+      number: "GPIO16"
+      mode:
+        input: True
+        pulldown: False
+  - platform: template
+    id: charging
+    name: "Charger"
+    device_class: plug
+  - platform: template
+    id: moving
+    name: moving
+    device_class: moving
+    on_press:
+      - lambda: 'wifi::global_wifi_component->enable();'
+  - platform: homeassistant
+    id: ha_start_request
+    entity_id: $ha_start_entity
+    internal: True
+    on_press:
+      - if:
+          condition:
+            and:
+              - binary_sensor.is_off: low_battery
+              - binary_sensor.is_off: theft_alarm
+              - switch.is_off: mow
+          then:
+            - switch.turn_on: mow
+  - platform: template
+    id: low_battery
+    name: "Low battery"
+    device_class: battery
+  - platform: template
+    id: theft_alarm
+    name: "Theft alarm"
+    device_class: tamper
+
+button:
+  - platform: template
+    name: "Clear theft alarm"
+    on_press:
+      - lambda: 'id(theft_alarm)->publish_state(false);'
+
+status_led:
+  pin:
+    number: "GPIO13"
+    inverted: True
+
+switch:
+  - platform: gpio
+    id: mow
+    name: "Mow"
+    pin:
+      inverted: False
+      number: "GPIO2"
+      mode:
+        output: True
+        open_drain: True
+    on_turn_on:
+      then:
+        - lambda: 'id(theft_armed) = false;'
+        - if:
+            condition:
+              binary_sensor.is_on: low_battery
+            then:
+              - switch.turn_off: mow
+            else:
+              - script.execute: mowing_timer
+    on_turn_off:
+      then:
+        - script.stop: mowing_timer
+
+interval:
+  - interval: 60s
+    then:
+      - lambda: !lambda |-
+          auto now = id(ha_time).now();
+          bool night = now.is_valid() && (now.hour >= $night_start_hour || now.hour < $night_end_hour);
+          id(theft_armed) = (night || $theft_arm_day) && id(charging)->state && !id(mow)->state && !id(moving)->state;
+          bool checkin = (now.minute % $checkin_period_minutes) < $checkin_minutes;
+          id(quiet_mode) = now.is_valid()
+            && !checkin
+            && !id(theft_alarm)->state
+            && id(charging)->state
+            && !id(mow)->state
+            && !id(moving)->state
+            && !id(low_battery)->state
+            && id(status)->state != "Fault"
+            && id(status)->state != "Unknown";
+      - if:
+          condition:
+            lambda: 'return id(quiet_mode);'
+          then:
+            - if:
+                condition: wifi.enabled
+                then:
+                  - wifi.disable
+          else:
+            - if:
+                condition:
+                  not: wifi.enabled
+                then:
+                  - wifi.enable
+
+script:
+  - id: mowing_timer
+    then:
+      - delay: !lambda 'return id(mowing_time).state * 60 * 1000;'
+      - switch.turn_off: mow
+  - id: check_parameters
+    then:
+      - lambda: !lambda |-
+          static_assert($max_mowing_time > 0, "max_mowing_time must be > 0");
+          static_assert($tick_interval > 0, "tick_interval must be > 0");
+          static_assert($vibration_update_interval % $tick_interval == 0, "vibration_interval must be a multiple of tick_interval");
+          static_assert($stand_still_delay % $vibration_update_interval == 0, "stand_still_delay must be multiple of vibration_interval");
+          static_assert($moving_delay % $vibration_update_interval == 0, "moving_delay must be multiple of vibration_interval");
+          static_assert($acc_update_interval % $tick_interval == 0, "acc_update_interval must be a multiple of tick_interval");
+          static_assert($battery_update_interval % $tick_interval == 0, "battery_update_interval must be a multiple of tick_interval");
+          static_assert($battery_filter_weight > 0.0 && $battery_filter_weight < 1.0, "battery_filter_weight must be > 0.0 and < 1.0");
+          static_assert($charging_threshold > $not_charging_threshold, "charging_threshold must be > not_charging_threshold");
+          static_assert($charging_delay % $battery_update_interval == 0, "charging_delay must be multiple of battery_update_interval");
+          static_assert($fault_recheck_delay % $battery_update_interval == 0, "fault_recheck_delay must be multiple of battery_update_interval");
+          static_assert($low_battery_delay % $battery_update_interval == 0, "low_battery_delay must be multiple of battery_update_interval");
+          static_assert($low_battery_resume_voltage > $low_battery_voltage, "resume must be > low");
+          static_assert($low_battery_voltage > $critical_battery_voltage, "low must be > critical");
+          static_assert($night_start_hour > $night_end_hour, "night window must cross midnight");
+          static_assert(60 % $checkin_period_minutes == 0, "checkin_period_minutes must divide 60");
+          static_assert($checkin_minutes < $checkin_period_minutes, "checkin_minutes must be < checkin_period_minutes");
+
+number:
+  - platform: template
+    name: "Mowing time"
+    id: mowing_time
+    icon: mdi:timer
+    restore_value: True
+    unit_of_measurement: "minutes"
+    min_value: 1
+    max_value: $max_mowing_time
+    step: 1
+    mode: BOX
+    optimistic: True
