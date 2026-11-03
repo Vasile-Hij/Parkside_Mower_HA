@@ -25,7 +25,7 @@ wifi:
   reboot_timeout: 0s # required: wifi is switched off at night
   ap:
     ssid: "Lawn Mower Fallback Hotspot"
-    password: "xyz"
+    password: !secret ap_pass
 
 captive_portal:
 
